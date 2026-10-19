@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Quotes</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            /* ? 背景改为白色 */
+            background: #ffffff;
+            color: #1f2328;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #238636, #2ea043);
+            color: #fff;
+            border: none;
+            padding: 10px 32px;
+            font-size: 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            letter-spacing: 1px;
+            font-weight: 600;
+        }
+        .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(46,160,67,0.3); }
+        .btn:active { transform: scale(0.97); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+        .quote-popup {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-20px);
+            /* ? 弹窗背景改为纯白，边框和阴影适配浅色 */
+            background: #ffffff;
+            border: 1px solid #d0d7de;
+            border-radius: 8px;
+            padding: 10px 14px;
+            box-shadow: 0 8px 24px rgba(31,35,40,0.12);
+            opacity: 0;
+            pointer-events: none;
+            transition: all 0.35s ease;
+            z-index: 999;
+            min-width: 280px;
+        }
+        .quote-popup.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+            pointer-events: auto;
+        }
+
+        .quote-header {
+            font-size: 10px;
+            color: #656d76;
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid #d8dee4;
+            padding-bottom: 4px;
+        }
+
+        .quote-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 3px 0;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        /* ? 名称/代码/价格颜色适配白色背景 */
+        .quote-row .name { color: #1f2328; min-width: 65px; font-size: 12px; }
+        .quote-row .code { color: #656d76; font-size: 10px; margin-left: 4px; }
+        .quote-row .price { min-width: 60px; text-align: right; font-family: "Menlo", "Consolas", monospace; font-size: 11px; }
+        .quote-row .change {
+            min-width: 58px;
+            text-align: right;
+            font-family: "Menlo", "Consolas", monospace;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 1px 5px;
+            border-radius: 3px;
+        }
+
+        /* ? 涨跌颜色保持 A 股红涨绿跌，在白色背景下更清晰 */
+        .up   { color: #cf222e; }
+        .down { color: #1a7f37; }
+        .flat { color: #656d76; }
+        .up-bg   { background: rgba(207,34,46,0.08); }
+        .down-bg { background: rgba(26,127,55,0.08); }
+
+        .progress-bar {
+            height: 2px;
+            background: #d8dee4;
+            border-radius: 1px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        .progress-bar .fill {
+            height: 100%;
+            background: #0969da;
+            width: 100%;
+            /* ? 时间改回 5s */
+            transition: width 5s linear;
+        }
+        .quote-popup.show .progress-bar .fill { width: 0%; }
+
+        .loading { font-size: 11px; color: #656d76; text-align: center; padding: 8px; }
+    </style>
+</head>
+<body>
+
+    <button class="btn" id="refreshBtn" onclick="fetchQuotes()">Sign</button>
+
+    <div class="quote-popup" id="quotePopup">
+        <div class="quote-header">
+            <span>名称 / 代码</span>
+            <span>最新价&nbsp;&nbsp;涨跌幅</span>
+        </div>
+        <div id="quoteBody"><div class="loading">Loading...</div></div>
+        <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    </div>
+
+    <script>
+        const STOCKS = [
+            { secid: '1.000001', label: '上证指数' },
+            { secid: '0.399006', label: '创业板指' },
+            { secid: '1.000688', label: '科创50' },
+            { secid: '1.688668', label: '鼎通科技' },
+            { secid: '0.002851', label: '麦格米特' },
+            { secid: '0.301123', label: '奕东电子' },
+        ];
+        // ? 时间改回 5000（5秒）
+        const DISPLAY_DURATION = 5000;
+
+        let hideTimer = null;
+        let jsonpCounter = 0;
+
+        function jsonp(url) {
+            return new Promise((resolve, reject) => {
+                const cbName = '_stkCb_' + (++jsonpCounter) + '_' + Date.now();
+                const script = document.createElement('script');
+                window[cbName] = (data) => {
+                    resolve(data);
+                    document.head.removeChild(script);
+                    delete window[cbName];
+                };
+                script.src = url + '&cb=' + cbName;
+                script.onerror = () => {
+                    reject(new Error('JSONP request failed'));
+                    document.head.removeChild(script);
+                    delete window[cbName];
+                };
+                document.head.appendChild(script);
+            });
+        }
+
+        async function fetchQuotes() {
+            const btn = document.getElementById('refreshBtn');
+            const popup = document.getElementById('quotePopup');
+            const body = document.getElementById('quoteBody');
+            const fill = document.getElementById('progressFill');
+
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+
+            if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+            popup.classList.remove('show');
+            fill.style.transition = 'none';
+            fill.style.width = '100%';
+
+            body.innerHTML = '<div class="loading">? Fetching data...</div>';
+
+            const secids = STOCKS.map(s => s.secid).join(',');
+            const url = `https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&fields=f2,f3,f4,f12,f14&secids=${secids}&ut=fa5fd1943c7b386f172d6893dbfba10b`;
+
+            try {
+                const data = await jsonp(url);
+                if (!data || !data.data || !data.data.diff) throw new Error('Invalid data format');
+
+                const items = data.data.diff;
+                let html = '';
+
+                items.forEach((item, i) => {
+                    const name = (item.f14 && item.f14 !== '-') ? item.f14 : (STOCKS[i] ? STOCKS[i].label : '--');
+                    const code = item.f12 || '--';
+                    const price = item.f2;
+                    const changePercent = item.f3;
+
+                    const priceStr = (price === '-' || price == null) ? '--' : Number(price).toFixed(2);
+                    const pctStr = (changePercent === '-' || changePercent == null) 
+                        ? '--' 
+                        : (changePercent >= 0 ? '+' : '') + Number(changePercent).toFixed(2) + '%';
+
+                    let cls = 'flat', bgCls = '';
+                    if (changePercent > 0) { cls = 'up'; bgCls = 'up-bg'; }
+                    else if (changePercent < 0) { cls = 'down'; bgCls = 'down-bg'; }
+
+                    html += `
+                        <div class="quote-row">
+                            <span>
+                                <span class="name">${name}</span>
+                                <span class="code">${code}</span>
+                            </span>
+                            <span>
+                                <span class="price ${cls}">${priceStr}</span>
+                                <span class="change ${cls} ${bgCls}">${pctStr}</span>
+                            </span>
+                        </div>`;
+                });
+
+                body.innerHTML = html;
+
+                void fill.offsetWidth;
+                // ? JS 中同步设置为 5s
+                fill.style.transition = 'width 5s linear';
+                popup.classList.add('show');
+                fill.style.width = '0%';
+
+                hideTimer = setTimeout(() => { popup.classList.remove('show'); }, DISPLAY_DURATION);
+
+            } catch (e) {
+                body.innerHTML = `<div class="loading">? Failed: ${e.message}</div>`;
+                popup.classList.add('show');
+                hideTimer = setTimeout(() => { popup.classList.remove('show'); }, 3000);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Sign';
+            }
+        }
+    </script>
+</body>
+</html>
